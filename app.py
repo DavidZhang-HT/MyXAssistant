@@ -2,12 +2,17 @@
 """Flask application for Twitter Likes analysis."""
 
 import sqlite3
+import threading
 from pathlib import Path
 
 from flask import Flask, g, jsonify, render_template, request
 
 app = Flask(__name__)
 DB_PATH = Path(__file__).parent / "twitter_likes.db"
+
+# Sync state (shared across requests)
+_sync_lock = threading.Lock()
+_sync_status = {"running": False, "last_result": None, "progress": []}
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +179,58 @@ def api_tweets():
         "total_pages": (total + per_page - 1) // per_page,
         "tweets": tweets,
     })
+
+
+# ---------------------------------------------------------------------------
+# Sync endpoints
+# ---------------------------------------------------------------------------
+@app.route("/api/sync", methods=["POST"])
+def api_sync():
+    """Trigger a sync from Twitter API. Non-blocking — runs in background."""
+    if _sync_status["running"]:
+        return jsonify({"status": "already_running", "message": "同步正在进行中..."}), 409
+
+    def run_sync():
+        from sync import sync_from_api
+        _sync_status["running"] = True
+        _sync_status["progress"] = []
+        try:
+            result = sync_from_api(
+                db_path=DB_PATH,
+                on_progress=lambda msg: _sync_status["progress"].append(msg),
+            )
+            _sync_status["last_result"] = result
+        except Exception as e:
+            _sync_status["last_result"] = {"status": "error", "message": str(e)}
+        finally:
+            _sync_status["running"] = False
+
+    thread = threading.Thread(target=run_sync, daemon=True)
+    thread.start()
+    return jsonify({"status": "started", "message": "同步已启动"})
+
+
+@app.route("/api/sync/status")
+def api_sync_status():
+    """Get current sync status."""
+    return jsonify({
+        "running": _sync_status["running"],
+        "progress": _sync_status["progress"][-10:],  # last 10 messages
+        "last_result": _sync_status["last_result"],
+    })
+
+
+@app.route("/api/sync/log")
+def api_sync_log():
+    """Get sync history."""
+    db = get_db()
+    try:
+        rows = db.execute(
+            "SELECT * FROM sync_log ORDER BY id DESC LIMIT 20"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+    except Exception:
+        return jsonify([])
 
 
 if __name__ == "__main__":
