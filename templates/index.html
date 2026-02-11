@@ -254,7 +254,17 @@ select option { background: var(--bg-card); }
 <!-- Header -->
 <header>
   <div class="container">
+<<<<<<< HEAD
     <h1><span>&#x2764;</span> MyXAssistant</h1>
+=======
+    <h1><span>&#x2764;</span> Twitter Likes 分析工具</h1>
+    <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
+      <span id="syncStatus" style="font-size:0.8rem; color:var(--text-dim)"></span>
+      <button class="btn" id="syncBtn" onclick="triggerSync()" style="background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600;">
+        &#x1f504; 同步数据
+      </button>
+    </div>
+>>>>>>> eebf01508a3af3c99b4621846c4b7ab6a74f99e3
   </div>
 </header>
 
@@ -502,6 +512,78 @@ qs('#orderSelect').addEventListener('change', e => {
   state.order = e.target.value;
   state.page = 1;
   loadTweets();
+});
+
+// ====================================================================
+// Sync
+// ====================================================================
+let syncPolling = null;
+
+async function triggerSync() {
+  const btn = qs('#syncBtn');
+  const status = qs('#syncStatus');
+  btn.disabled = true;
+  btn.textContent = '⏳ 同步中...';
+  status.textContent = '正在连接 Twitter API...';
+
+  try {
+    const res = await fetch('/api/sync', { method: 'POST' });
+    const d = await res.json();
+    if (d.status === 'already_running') {
+      status.textContent = '同步正在进行中...';
+    }
+    // Poll for status
+    syncPolling = setInterval(pollSync, 2000);
+  } catch (e) {
+    status.textContent = '同步启动失败';
+    btn.disabled = false;
+    btn.textContent = '🔄 同步数据';
+  }
+}
+
+async function pollSync() {
+  const btn = qs('#syncBtn');
+  const status = qs('#syncStatus');
+  try {
+    const res = await fetch('/api/sync/status');
+    const d = await res.json();
+    if (d.progress.length > 0) {
+      status.textContent = d.progress[d.progress.length - 1];
+    }
+    if (!d.running) {
+      clearInterval(syncPolling);
+      syncPolling = null;
+      btn.disabled = false;
+      btn.textContent = '🔄 同步数据';
+      if (d.last_result) {
+        const r = d.last_result;
+        status.textContent = r.status === 'error'
+          ? `❌ ${r.message}`
+          : `✅ 新增 ${r.new_count} 条 (共获取 ${r.total_fetched} 条)`;
+        // Refresh data
+        if (r.new_count > 0) {
+          loadStats();
+          loadTweets();
+        }
+      }
+    }
+  } catch (e) {
+    // ignore polling errors
+  }
+}
+
+// Check if a sync was left running
+fetch('/api/sync/status').then(r => r.json()).then(d => {
+  if (d.running) {
+    qs('#syncBtn').disabled = true;
+    qs('#syncBtn').textContent = '⏳ 同步中...';
+    syncPolling = setInterval(pollSync, 2000);
+  } else if (d.last_result) {
+    const r = d.last_result;
+    qs('#syncStatus').textContent = r.status === 'error'
+      ? `上次: ❌ ${r.message}`
+      : `上次: ✅ 新增 ${r.new_count} 条`;
+  }
 });
 
 // ====================================================================

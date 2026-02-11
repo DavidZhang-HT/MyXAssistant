@@ -1,13 +1,34 @@
 #!/usr/bin/env python3
+<<<<<<< HEAD
 """Flask application for MyXAssistant."""
+=======
+"""
+MyXAssistant — Twitter/X 数据服务。
+
+作为独立 HTTP 服务运行，对外提供统一的 REST API：
+  - 数据同步（从 Twitter API 拉取 likes）
+  - 数据查询（搜索、筛选、统计）
+  - 发布推文
+  - 网页展示
+
+外部系统（如 OpenClaw）通过 HTTP API 与本服务交互，不直接访问数据库或脚本。
+"""
+>>>>>>> eebf01508a3af3c99b4621846c4b7ab6a74f99e3
 
 import sqlite3
+import threading
 from pathlib import Path
 
 from flask import Flask, g, jsonify, render_template, request
 
 app = Flask(__name__)
 DB_PATH = Path(__file__).parent / "twitter_likes.db"
+
+# Sync state (shared across requests)
+_sync_lock = threading.Lock()
+_sync_status = {"running": False, "last_result": None, "progress": []}
+
+SERVICE_VERSION = "1.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +49,28 @@ def close_db(exc):
 
 
 # ---------------------------------------------------------------------------
+# Service info
+# ---------------------------------------------------------------------------
+@app.route("/api/health")
+def api_health():
+    """Health check endpoint."""
+    db = get_db()
+    try:
+        total = db.execute("SELECT COUNT(*) FROM tweets").fetchone()[0]
+        db_ok = True
+    except Exception:
+        total = 0
+        db_ok = False
+    return jsonify({
+        "status": "ok" if db_ok else "degraded",
+        "service": "myxassistant",
+        "version": SERVICE_VERSION,
+        "db_tweets": total,
+        "sync_running": _sync_status["running"],
+    })
+
+
+# ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
 @app.route("/")
@@ -36,7 +79,7 @@ def index():
 
 
 # ---------------------------------------------------------------------------
-# API endpoints
+# API — Stats
 # ---------------------------------------------------------------------------
 @app.route("/api/stats")
 def api_stats():
@@ -54,11 +97,9 @@ def api_stats():
             ORDER BY cnt DESC
         """)
     ]
-    # Date range
     date_range = db.execute(
         "SELECT MIN(created_at) AS min_date, MAX(created_at) AS max_date FROM tweets"
     ).fetchone()
-    # Top authors
     top_authors = [
         {"name": r["author_name"], "screen_name": r["author_screen_name"], "count": r["cnt"]}
         for r in db.execute("""
@@ -79,6 +120,9 @@ def api_stats():
     })
 
 
+# ---------------------------------------------------------------------------
+# API — Tweets (list / search / filter)
+# ---------------------------------------------------------------------------
 @app.route("/api/tweets")
 def api_tweets():
     """Return paginated, searchable, filterable tweets.
@@ -110,22 +154,17 @@ def api_tweets():
     where_clauses: list[str] = []
     joins: list[str] = []
 
-    # Full-text search
     if q:
-        # Use FTS5 match
         where_clauses.append("t.tweet_id IN (SELECT tweet_id FROM tweets_fts WHERE tweets_fts MATCH ?)")
-        # Escape special chars for FTS5 and wrap each word in quotes
         fts_query = " ".join(f'"{w}"' for w in q.split() if w)
         params.append(fts_query)
 
-    # Category filter
     if cat_ids:
         placeholders = ",".join("?" * len(cat_ids))
         joins.append("JOIN tweet_categories tc ON tc.tweet_id = t.tweet_id")
         where_clauses.append(f"tc.category_id IN ({placeholders})")
         params.extend(cat_ids)
 
-    # Author filter
     if author:
         where_clauses.append("t.author_screen_name = ?")
         params.append(author)
@@ -133,11 +172,9 @@ def api_tweets():
     join_sql = " ".join(joins)
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    # Count
     count_sql = f"SELECT COUNT(DISTINCT t.tweet_id) FROM tweets t {join_sql} {where_sql}"
     total = db.execute(count_sql, params).fetchone()[0]
 
-    # Fetch page
     offset = (page - 1) * per_page
     data_sql = f"""
         SELECT DISTINCT t.*, GROUP_CONCAT(c.name, ', ') AS categories
@@ -153,19 +190,7 @@ def api_tweets():
     params.extend([per_page, offset])
     rows = db.execute(data_sql, params).fetchall()
 
-    tweets = []
-    for r in rows:
-        tweets.append({
-            "tweet_id": r["tweet_id"],
-            "created_at": r["created_at"],
-            "text": r["text"],
-            "author_name": r["author_name"],
-            "author_screen_name": r["author_screen_name"],
-            "retweet_count": r["retweet_count"],
-            "favorite_count": r["favorite_count"],
-            "tweet_url": r["tweet_url"],
-            "categories": r["categories"] or "Other",
-        })
+    tweets = [_row_to_tweet(r) for r in rows]
 
     return jsonify({
         "total": total,
@@ -174,6 +199,129 @@ def api_tweets():
         "total_pages": (total + per_page - 1) // per_page,
         "tweets": tweets,
     })
+
+
+def _row_to_tweet(r) -> dict:
+    return {
+        "tweet_id": r["tweet_id"],
+        "created_at": r["created_at"],
+        "text": r["text"],
+        "author_name": r["author_name"],
+        "author_screen_name": r["author_screen_name"],
+        "retweet_count": r["retweet_count"],
+        "favorite_count": r["favorite_count"],
+        "tweet_url": r["tweet_url"],
+        "categories": r["categories"] or "Other",
+    }
+
+
+# ---------------------------------------------------------------------------
+# API — Single tweet by ID
+# ---------------------------------------------------------------------------
+@app.route("/api/tweets/<tweet_id>")
+def api_tweet_detail(tweet_id):
+    """Get a single tweet by tweet_id."""
+    db = get_db()
+    r = db.execute("""
+        SELECT t.*, GROUP_CONCAT(c.name, ', ') AS categories
+        FROM tweets t
+        LEFT JOIN tweet_categories tc ON tc.tweet_id = t.tweet_id
+        LEFT JOIN categories c ON c.id = tc.category_id
+        WHERE t.tweet_id = ?
+        GROUP BY t.tweet_id
+    """, (tweet_id,)).fetchone()
+    if not r:
+        return jsonify({"error": "Tweet not found"}), 404
+    return jsonify(_row_to_tweet(r))
+
+
+# ---------------------------------------------------------------------------
+# API — Sync (trigger download from Twitter API)
+# ---------------------------------------------------------------------------
+@app.route("/api/sync", methods=["POST"])
+def api_sync():
+    """Trigger a sync from Twitter API.
+
+    Non-blocking — runs in background.
+    Optional JSON body: {"full": true} for full historical sync.
+    """
+    if _sync_status["running"]:
+        return jsonify({"status": "already_running", "message": "同步正在进行中..."}), 409
+
+    body = request.get_json(silent=True) or {}
+    max_pages = 999 if body.get("full") else 1
+
+    def run_sync():
+        from sync import sync_from_api
+        _sync_status["running"] = True
+        _sync_status["progress"] = []
+        try:
+            result = sync_from_api(
+                db_path=DB_PATH,
+                on_progress=lambda msg: _sync_status["progress"].append(msg),
+                max_pages=max_pages,
+            )
+            _sync_status["last_result"] = result
+        except Exception as e:
+            _sync_status["last_result"] = {"status": "error", "message": str(e)}
+        finally:
+            _sync_status["running"] = False
+
+    thread = threading.Thread(target=run_sync, daemon=True)
+    thread.start()
+    return jsonify({"status": "started", "message": "同步已启动"})
+
+
+@app.route("/api/sync/status")
+def api_sync_status():
+    """Get current sync status."""
+    return jsonify({
+        "running": _sync_status["running"],
+        "progress": _sync_status["progress"][-10:],
+        "last_result": _sync_status["last_result"],
+    })
+
+
+@app.route("/api/sync/log")
+def api_sync_log():
+    """Get sync history."""
+    db = get_db()
+    try:
+        rows = db.execute(
+            "SELECT * FROM sync_log ORDER BY id DESC LIMIT 20"
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+    except Exception:
+        return jsonify([])
+
+
+# ---------------------------------------------------------------------------
+# API — Publish tweet
+# ---------------------------------------------------------------------------
+@app.route("/api/publish", methods=["POST"])
+def api_publish():
+    """Publish a new tweet.
+
+    JSON body: {"text": "tweet content"}
+    Returns the created tweet data from Twitter API.
+    """
+    body = request.get_json(silent=True)
+    if not body or not body.get("text"):
+        return jsonify({"error": "Missing 'text' in request body"}), 400
+
+    text = body["text"].strip()
+    if not text:
+        return jsonify({"error": "Tweet text cannot be empty"}), 400
+    if len(text) > 280:
+        return jsonify({"error": f"Tweet too long: {len(text)}/280 characters"}), 400
+
+    try:
+        from sync import TwitterAPI
+        api = TwitterAPI()
+        result = api.post_tweet(text)
+        return jsonify({"status": "success", "tweet": result})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 if __name__ == "__main__":
