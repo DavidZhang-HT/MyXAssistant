@@ -35,7 +35,7 @@ _sync_lock = threading.Lock()
 _sync_status = {"running": False, "last_result": None, "progress": []}
 
 SERVICE_VERSION = "1.1.0"
-CALLBACK_URL = "http://127.0.0.1:5001/callback"
+CALLBACK_URL = "http://43.135.130.83/myx/callback"
 
 
 # ---------------------------------------------------------------------------

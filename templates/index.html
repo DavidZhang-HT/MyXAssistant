@@ -321,6 +321,11 @@ select option { background: var(--bg-card); }
 
 <script>
 // ====================================================================
+// Base URL — auto-detect from current page path
+// ====================================================================
+const BASE = window.location.pathname.replace(/\/$/, '');
+
+// ====================================================================
 // State
 // ====================================================================
 const state = {
@@ -364,7 +369,7 @@ function debounce(fn, ms) {
 // Fetch Stats
 // ====================================================================
 async function loadStats() {
-  const res = await fetch('/api/stats');
+  const res = await fetch(BASE + '/api/stats');
   const d = await res.json();
   qs('#statTotal').textContent = d.total.toLocaleString();
   qs('#statAuthors').textContent = d.authors.toLocaleString();
@@ -422,7 +427,7 @@ async function loadTweets() {
 
   qs('#tweetFeed').innerHTML = '<div class="loading"><div class="spinner"></div></div>';
 
-  const res = await fetch('/api/tweets?' + params);
+  const res = await fetch(BASE + '/api/tweets?' + params);
   const d = await res.json();
 
   qs('#feedCount').textContent = `共 ${d.total.toLocaleString()} 条结果`;
@@ -523,7 +528,7 @@ async function triggerSync() {
   status.textContent = '正在连接 Twitter API...';
 
   try {
-    const res = await fetch('/api/sync', { method: 'POST' });
+    const res = await fetch(BASE + '/api/sync', { method: 'POST' });
     const d = await res.json();
     if (d.status === 'already_running') {
       status.textContent = '同步正在进行中...';
@@ -541,7 +546,7 @@ async function pollSync() {
   const btn = qs('#syncBtn');
   const status = qs('#syncStatus');
   try {
-    const res = await fetch('/api/sync/status');
+    const res = await fetch(BASE + '/api/sync/status');
     const d = await res.json();
     if (d.progress.length > 0) {
       status.textContent = d.progress[d.progress.length - 1];
@@ -569,7 +574,7 @@ async function pollSync() {
 }
 
 // Check if a sync was left running
-fetch('/api/sync/status').then(r => r.json()).then(d => {
+fetch(BASE + '/api/sync/status').then(r => r.json()).then(d => {
   if (d.running) {
     qs('#syncBtn').disabled = true;
     qs('#syncBtn').textContent = '⏳ 同步中...';
