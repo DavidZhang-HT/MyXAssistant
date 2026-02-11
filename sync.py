@@ -297,16 +297,22 @@ class TwitterAPI:
 # ---------------------------------------------------------------------------
 # Core sync function
 # ---------------------------------------------------------------------------
-def sync_from_api(db_path: Path | None = None, on_progress=None) -> dict:
+def sync_from_api(db_path: Path | None = None, on_progress=None,
+                   max_pages: int = 1) -> dict:
     """
-    Fetch likes from Twitter API v2 and write directly to SQLite.
+    Fetch latest likes from Twitter API v2 and write directly to SQLite.
+
+    默认只请求第一页（最多 100 条最新点赞），以节省 API 调用配额。
+    Twitter likes API 返回的是按时间倒序排列的，所以第一页就是最新的点赞。
+    对于日常增量同步，一页足够覆盖两次同步之间的新增点赞。
 
     Args:
         db_path:      Path to SQLite database (default: project dir)
         on_progress:  Optional callback(message: str) for progress updates
+        max_pages:    最多请求的页数（默认 1，即只请求第一页，仅 1 次 API 调用）
 
     Returns:
-        dict with keys: new_count, total_fetched, status, message
+        dict with keys: new_count, total_fetched, status, message, api_calls
     """
     if db_path is None:
         db_path = DB_PATH
@@ -316,12 +322,14 @@ def sync_from_api(db_path: Path | None = None, on_progress=None) -> dict:
         if on_progress:
             on_progress(msg)
 
-    result = {"new_count": 0, "total_fetched": 0, "status": "success", "message": ""}
+    result = {"new_count": 0, "total_fetched": 0, "status": "success",
+              "message": "", "api_calls": 0}
 
     try:
         api = TwitterAPI()
         log("正在获取用户信息...")
         user_id = api.get_user_id()
+        result["api_calls"] += 1
         log(f"用户ID: {user_id}")
 
         conn = sqlite3.connect(str(db_path))
@@ -335,14 +343,14 @@ def sync_from_api(db_path: Path | None = None, on_progress=None) -> dict:
 
         pagination_token = None
         page = 0
-        consecutive_dupes = 0  # stop early if all dupes
 
-        while True:
+        while page < max_pages:
             page += 1
-            log(f"正在获取第 {page} 页...")
+            log(f"正在获取第 {page}/{max_pages} 页...")
 
             try:
                 resp = api.get_liked_tweets(user_id, pagination_token=pagination_token)
+                result["api_calls"] += 1
             except Exception as e:
                 log(f"API 请求失败: {e}")
                 result["status"] = "partial"
@@ -379,14 +387,10 @@ def sync_from_api(db_path: Path | None = None, on_progress=None) -> dict:
             conn.commit()
             log(f"  第 {page} 页: {len(tweets_data)} 条, 新增 {page_new} 条")
 
-            # Early stop: if 3 consecutive pages have 0 new, we've caught up
+            # 如果本页全是已有数据，无需继续翻页
             if page_new == 0:
-                consecutive_dupes += 1
-                if consecutive_dupes >= 3:
-                    log("已连续 3 页无新数据，同步完成。")
-                    break
-            else:
-                consecutive_dupes = 0
+                log("本页无新数据，已同步至最新。")
+                break
 
             pagination_token = resp.get("meta", {}).get("next_token")
             if not pagination_token:
@@ -396,7 +400,9 @@ def sync_from_api(db_path: Path | None = None, on_progress=None) -> dict:
             time.sleep(1)  # Rate limit
 
         conn.close()
-        summary = f"同步完成: 共获取 {result['total_fetched']} 条, 新增 {result['new_count']} 条"
+        summary = (f"同步完成: 获取 {result['total_fetched']} 条, "
+                   f"新增 {result['new_count']} 条 "
+                   f"(API 调用 {result['api_calls']} 次)")
         log(summary)
         result["message"] = summary
 
@@ -476,10 +482,15 @@ if __name__ == "__main__":
         result = sync_from_json(sys.argv[1])
     else:
         # Sync from Twitter API
-        print("从 Twitter API 同步...")
+        full_mode = "--full" in sys.argv
+        pages = 999 if full_mode else 1
+        mode_label = "完整同步" if full_mode else "增量同步 (仅第一页)"
+        print(f"从 Twitter API {mode_label}...")
         print(f"数据库: {DB_PATH}")
         print(f"凭证: {CREDENTIALS_PATH}")
-        result = sync_from_api()
+        if not full_mode:
+            print("提示: 使用 --full 参数可获取全部历史数据")
+        result = sync_from_api(max_pages=pages)
 
     print(f"\n结果: {json.dumps(result, ensure_ascii=False, indent=2)}")
     sys.exit(0 if result["status"] != "error" else 1)
