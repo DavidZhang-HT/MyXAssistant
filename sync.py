@@ -309,6 +309,28 @@ class TwitterAPI:
             params["pagination_token"] = pagination_token
         return self._get(url, params)
 
+    def post_tweet(self, text: str) -> dict:
+        """Publish a tweet using Twitter API v2."""
+        url = "https://api.twitter.com/2/tweets"
+        payload = json.dumps({"text": text}).encode()
+        auth_header = self._auth_header("POST", url)
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Authorization": auth_header,
+                "Content-Type": "application/json",
+                "User-Agent": "MyXAssistant/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode()
+            raise Exception(f"Twitter API error {e.code}: {error_body}")
+
 
 # ---------------------------------------------------------------------------
 # Core sync function

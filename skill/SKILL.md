@@ -1,118 +1,132 @@
 ---
 name: sync-twitter-likes
-description: Sync Twitter/X likes data to local SQLite database and query liked tweets. Use when the user asks to sync likes, fetch new likes, update Twitter data, check latest likes, search liked tweets, or manage the Twitter likes database.
+description: Interact with the MyXAssistant service to sync Twitter/X likes, search liked tweets, get stats, and publish tweets. Use when the user asks to sync likes, fetch new likes, search liked tweets, query Twitter data, check like stats, or post a tweet.
 ---
 
-# Sync Twitter Likes
+# MyXAssistant Service
 
-从 Twitter API v2 增量同步用户点赞数据到 SQLite 数据库，支持查询和网页展示。
+MyXAssistant 是一个独立的 HTTP 服务，管理用户的 Twitter/X 点赞数据和发推。
+所有操作通过 HTTP API 完成，不要直接访问数据库或运行脚本。
 
-## 安装
+**服务地址：** `http://127.0.0.1:5000`
 
+## API 参考
+
+### 1. 健康检查
+
+```
+GET /api/health
+```
+
+返回服务状态、数据库推文总数、是否正在同步。用于确认服务是否在线。
+
+---
+
+### 2. 同步 likes 数据
+
+通知服务从 Twitter API 拉取最新的点赞数据（服务自行下载，异步执行）。
+
+**触发同步：**
+
+```
+POST /api/sync
+Content-Type: application/json
+
+{}
+```
+
+默认增量同步（仅最新 100 条，2 次 API 调用）。完整同步传 `{"full": true}`，但 Twitter API 是收费的，**仅在用户明确要求时使用**。
+
+**查询同步状态：**
+
+```
+GET /api/sync/status
+```
+
+返回 `running`（是否进行中）、`progress`（进度消息）、`last_result`（上次结果）。
+
+**同步历史：**
+
+```
+GET /api/sync/log
+```
+
+---
+
+### 3. 查询推文
+
+**列表/搜索/筛选：**
+
+```
+GET /api/tweets?q=关键词&category=1&author=ericosiu&sort=favorite_count&order=desc&page=1&per_page=20
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `q` | 全文搜索关键词 | - |
+| `category` | 分类ID（可多次传） | - |
+| `author` | 作者 screen_name | - |
+| `sort` | `created_at` / `favorite_count` / `retweet_count` | `created_at` |
+| `order` | `asc` / `desc` | `desc` |
+| `page` | 页码 | 1 |
+| `per_page` | 每页数量（最大100） | 20 |
+
+**按 ID 查询单条：**
+
+```
+GET /api/tweets/{tweet_id}
+```
+
+---
+
+### 4. 统计数据
+
+```
+GET /api/stats
+```
+
+返回：总数、作者数、分类列表及数量、时间范围、热门作者 Top 20。
+
+---
+
+### 5. 发布推文
+
+```
+POST /api/publish
+Content-Type: application/json
+
+{"text": "要发布的推文内容"}
+```
+
+限制 280 字符。返回 Twitter API 的响应。
+
+---
+
+## 使用示例
+
+**同步最新数据：**
 ```bash
-git clone https://github.com/DavidZhang-HT/myxassitent.git
-cd myxassitent
-cp config.env.example config.env
-# 编辑 config.env 填入你的 Twitter API 凭证
+curl -X POST http://127.0.0.1:5000/api/sync
 ```
 
-## 配置
-
-编辑项目根目录的 `config.env`：
-
-```env
-TWITTER_API_KEY=your_key
-TWITTER_API_SECRET=your_secret
-TWITTER_ACCESS_TOKEN=your_token
-TWITTER_ACCESS_SECRET=your_token_secret
-```
-
-也可通过环境变量指定自定义路径：
-- `MYX_CONFIG` — config.env 文件路径
-- `MYX_DB` — SQLite 数据库路径
-
-## 同步
-
-### 增量同步（默认，2 次 API 调用）
-
+**等待完成并检查结果：**
 ```bash
-python3 sync.py
+curl http://127.0.0.1:5000/api/sync/status
 ```
 
-### 完整同步（首次使用或数据恢复）
-
+**搜索 AI 相关推文：**
 ```bash
-python3 sync.py --full
+curl "http://127.0.0.1:5000/api/tweets?q=AI&sort=favorite_count&per_page=5"
 ```
 
-### 从 JSON 文件导入
-
+**查看某个作者的所有点赞：**
 ```bash
-python3 sync.py /path/to/twitter_likes.json
+curl "http://127.0.0.1:5000/api/tweets?author=kwindla"
 ```
 
-**注意：Twitter API 按调用计费，默认增量模式仅请求最新一页。仅在用户明确要求时使用 `--full`。**
-
-## 查询数据
-
+**发一条推文：**
 ```bash
-sqlite3 twitter_likes.db
+curl -X POST http://127.0.0.1:5000/api/publish \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello from MyXAssistant!"}'
 ```
-
-### 常用查询
-
-```sql
--- 总数
-SELECT COUNT(*) FROM tweets;
-
--- 搜索推文
-SELECT author_screen_name, text, favorite_count
-FROM tweets WHERE text LIKE '%关键词%'
-ORDER BY favorite_count DESC LIMIT 20;
-
--- 全文搜索 (FTS5)
-SELECT t.* FROM tweets t
-JOIN tweets_fts fts ON fts.tweet_id = t.tweet_id
-WHERE tweets_fts MATCH '"search term"' LIMIT 20;
-
--- 按分类查询
-SELECT t.text, t.author_screen_name, c.name AS category
-FROM tweets t
-JOIN tweet_categories tc ON tc.tweet_id = t.tweet_id
-JOIN categories c ON c.id = tc.category_id
-WHERE c.name = 'AI/ML'
-ORDER BY t.favorite_count DESC LIMIT 20;
-
--- 分类统计
-SELECT c.name, COUNT(tc.tweet_id) AS cnt
-FROM categories c
-LEFT JOIN tweet_categories tc ON tc.category_id = c.id
-GROUP BY c.id ORDER BY cnt DESC;
-
--- 热门作者
-SELECT author_name, author_screen_name, COUNT(*) AS cnt
-FROM tweets GROUP BY author_screen_name
-ORDER BY cnt DESC LIMIT 20;
-
--- 同步记录
-SELECT * FROM sync_log ORDER BY id DESC LIMIT 5;
-```
-
-## 网页界面
-
-```bash
-python3 app.py
-# 访问 http://127.0.0.1:5000
-```
-
-支持列表展示、全文搜索、分类筛选、作者筛选、排序和在线同步。
-
-## 数据库表
-
-| 表 | 字段 |
-|---|---|
-| `tweets` | tweet_id, created_at, text, author_name, author_screen_name, author_id, retweet_count, favorite_count, tweet_url |
-| `categories` | id, name |
-| `tweet_categories` | tweet_id, category_id |
-| `tweets_fts` | 全文搜索虚拟表 |
-| `sync_log` | synced_at, new_count, total_fetched, status, message |
