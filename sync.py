@@ -371,12 +371,11 @@ class TwitterAPI:
 
     def upload_media_simple(self, file_data: bytes, media_type: str) -> str:
         """Upload an image via simple multipart upload. Returns media_id_string."""
+        import base64
+        # Twitter API requires base64 encoded media data
+        b64_data = base64.b64encode(file_data).decode('utf-8')
         result = self._post_form(
-            self.UPLOAD_URL, fields={},
-            file_field="media_data",
-            file_data=file_data,
-            file_name="media",
-            file_content_type=media_type,
+            self.UPLOAD_URL, fields={"media_data": b64_data},
         )
         return result["media_id_string"]
 
